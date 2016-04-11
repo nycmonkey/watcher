@@ -1,0 +1,12 @@
+{
+	"version": 0,
+	"dependencies": [
+		{
+			"importpath": "github.com/cenkalti/backoff",
+			"repository": "https://github.com/cenkalti/backoff",
+			"revision": "32cd0c5b3aef12c76ed64aaf678f6c79736be7dc",
+			"branch": "master",
+			"notests": true
+		}
+	]
+}
