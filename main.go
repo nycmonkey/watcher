@@ -140,6 +140,7 @@ func registerWatcher(glob string) (err error) {
 }
 
 func ingestFile(path, subject string) (id string, err error) {
+	notCreated := errors.New("Wrong status code")
 	operation := func() error {
 		var resp *http.Response
 		params := url.Values{}
@@ -147,12 +148,15 @@ func ingestFile(path, subject string) (id string, err error) {
 		params.Set("subject", subject)
 		resp, err = client.PostForm(config.VaultURL, params)
 		defer resp.Body.Close()
-		var data []byte
-		data, err = ioutil.ReadAll(resp.Body)
-		if err == nil {
-			id = string(data)
+		if resp.StatusCode == http.StatusCreated {
+			var data []byte
+			data, err = ioutil.ReadAll(resp.Body)
+			if err == nil {
+				id = string(data)
+			}
+			return err
 		}
-		return err
+		return notCreated
 	}
 	err = backoff.Retry(operation, backoff.NewExponentialBackOff())
 	return
@@ -185,7 +189,7 @@ func processFile(path string) {
 					log.Println("OUTPUT ERR:", err)
 					continue
 				}
-				log.Println("SENDING", filepath.join(dest, filepath.Base(path)))
+				log.Println("SENDING", filepath.Join(dest, filepath.Base(path)))
 				writers = append(writers, o)
 				defer o.Close()
 			}
