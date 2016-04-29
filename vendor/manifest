@@ -2,6 +2,13 @@
 	"version": 0,
 	"dependencies": [
 		{
+			"importpath": "github.com/alexbrainman/sspi",
+			"repository": "https://github.com/alexbrainman/sspi",
+			"revision": "658068b2915c6dda033d1df7e3430d59e3abf349",
+			"branch": "master",
+			"notests": true
+		},
+		{
 			"importpath": "github.com/cenkalti/backoff",
 			"repository": "https://github.com/cenkalti/backoff",
 			"revision": "32cd0c5b3aef12c76ed64aaf678f6c79736be7dc",
