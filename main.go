@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -16,13 +15,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/alexbrainman/sspi/ntlm"
 	"github.com/cenkalti/backoff"
 	"github.com/fsnotify/fsnotify"
 )
@@ -49,6 +48,7 @@ type Config struct {
 	VaultURL string
 	CACert   string
 	LogFile  string
+	CURLPath string
 	Files    []*FileConfig
 }
 
@@ -185,7 +185,7 @@ func processFile(path string) {
 		var requestURLs []string
 		writers = append(writers, digest)
 		for _, dest := range conf.Outbound {
-			if strings.HasPrefix(dest, "http") {
+			if strings.HasPrefix(dest, "http:") || strings.HasPrefix(dest, "https:") {
 				requestURLs = append(requestURLs, dest)
 			} else {
 				_ = os.MkdirAll(dest, 0666)
@@ -243,8 +243,6 @@ func processFile(path string) {
 		if err != nil {
 			log.Fatalln("BUG in json marshalling:", err)
 		}
-		client := &http.Client{}
-		client.Timeout = 3 * time.Second
 		httpCalls := new(sync.WaitGroup)
 		for _, u := range requestURLs {
 			httpCalls.Add(1)
@@ -260,105 +258,29 @@ func processFile(path string) {
 
 func notifyByHTTP(url, id string, postData []byte, wg *sync.WaitGroup) {
 	defer wg.Done()
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(postData))
+	cmd := exec.Command(config.CURLPath,
+		"-H", "Content-Type: application/json",
+		"--ntlm",
+		"-u", ":",
+		"-X", "POST",
+		"-d", string(postData),
+		"--silent",
+		"--output", "nul",
+		"--write-out", "%{http_code}",
+		url)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	err := cmd.Run()
 	if err != nil {
-		log.Println("ERROR while creating http request:", err)
-		log.Println("NOTIFY FAIL:", url)
+		log.Println("FAILED TO NOTIFY", url, "about", id+":", err)
 		return
 	}
-
-	resp, err := get(req)
-	if resp.StatusCode == http.StatusOK {
-		log.Println("NOTIFIED", url, "about", id)
-		return
-	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		log.Println("ERROR while notifying via HTTP - unexpected status code:", resp.StatusCode)
-		log.Println("NOTIFY FAIL:", url)
-		return
-	}
-
-	cred, err := ntlm.AcquireCurrentUserCredentials()
-	if err != nil {
-		log.Println("ERROR while acquiring credentials for NTLM:", err)
-		log.Println("NOTIFY FAIL:", url)
-		return
-	}
-	defer cred.Release()
-
-	secctx, negotiate, err := ntlm.NewClientContext(cred)
-	if err != nil {
-		log.Println("ERROR while creating client context for NTLM:", err)
-		log.Println("NOTIFY FAIL:", url)
-		return
-	}
-	defer secctx.Release()
-
-	req, err = http.NewRequest("POST", url, bytes.NewBuffer(postData))
-	if err != nil {
-		log.Println("ERROR while creating http request for NTLM negotiation:", err)
-		log.Println("NOTIFY FAIL:", url)
-		return
-	}
-	req.Header.Set("Authorization", "NTLM "+base64.StdEncoding.EncodeToString(negotiate))
-	resp, err = get(req)
-	if resp.StatusCode == http.StatusOK {
-		log.Println("NOTIFIED", url, "about", id)
-	}
-	if resp.StatusCode != 401 {
-		log.Println("ERROR during notification: unexpected HTTP StatusCode -", resp.StatusCode)
-		log.Println("NOTIFY FAIL:", url)
-		return
-	}
-	authHeaders, found := resp.Header["Www-Authenticate"]
-	if !found || len(authHeaders) != 1 || len(authHeaders[0]) < 6 || !strings.HasPrefix(authHeaders[0], "NTLM ") {
-		log.Println("ERROR during notification: unexpected response headers")
-		log.Println("NOTIFY FAIL:", url)
-		return
-	}
-	log.Println("Header:", authHeaders[0])
-	challenge, err := base64.StdEncoding.DecodeString(authHeaders[0][5:])
-	if err != nil {
-		log.Println("ERROR during notification: couldn't decode challenge")
-		log.Println("NOTIFY FAIL:", url)
-		return
-	}
-	authenticate, err := secctx.Update(challenge)
-	if err != nil {
-		log.Println("ERROR during notification: couldn't process challenge")
-		log.Println("NOTIFY FAIL:", url)
-		return
-	}
-	req, err = http.NewRequest("POST", url, bytes.NewBuffer(postData))
-	if err != nil {
-		log.Println("ERROR while creating http request for NTLM authentication:", err)
-		log.Println("NOTIFY FAIL:", url)
-		return
-	}
-	req.Header.Set("Authorization", "NTLM "+base64.StdEncoding.EncodeToString(authenticate))
-	resp, err = get(req)
-	if err != nil {
-		log.Println("ERROR while making NTLM authentication request:", err)
-		log.Println("NOTIFY FAIL:", url)
-		return
-	}
-	if resp.StatusCode != http.StatusOK {
-		log.Println("NTLM authentication failed with status code", resp.StatusCode)
-		log.Printf("%+v\r\n", resp)
-		log.Println("NOTIFY FAIL:", url)
+	if out.String() != "200" {
+		log.Println("FAILED TO NOTIFY", url, "about", id+":", "received status code "+out.String())
 		return
 	}
 	log.Println("NOTIFIED", url, "about", id)
 	return
-}
-
-func get(req *http.Request) (*http.Response, error) {
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	return res, nil
 }
 
 func removeInboundFile(path string) error {
@@ -400,8 +322,10 @@ func handleEvents() {
 				log.Println("FSNOTIFY ERR:", err)
 			}
 		case <-time.After(15 * time.Minute):
+			mu.Lock()
 			newWatcher, err := setupWatcher()
 			if err != nil {
+				mu.Unlock()
 				log.Println("ERROR RELOADING WATCHER:", err)
 				continue
 			}
@@ -409,6 +333,7 @@ func handleEvents() {
 			watcher = newWatcher
 			oldWatcher.Close()
 			oldWatcher = nil
+			mu.Unlock()
 		}
 	}
 }
