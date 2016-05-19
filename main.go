@@ -29,7 +29,7 @@ import (
 var (
 	watcher       *fsnotify.Watcher
 	wg            sync.WaitGroup
-	inProgress    map[string]bool
+	inProgress    map[string]*time.Timer
 	client        *http.Client
 	config        *Config
 	configPath    = flag.String("config", "config.json", "path to the configuration file")
@@ -82,7 +82,7 @@ func main() {
 	if err != nil {
 		log.Fatalln("Error setting up fsnotify.Watcher:", err)
 	}
-	inProgress = make(map[string]bool)
+	inProgress = make(map[string]*time.Timer)
 
 	// handle file notifications
 	go handleEvents()
@@ -301,21 +301,24 @@ func handleEvents() {
 	for {
 		select {
 		case event := <-watcher.Events:
-			if event.Op == fsnotify.Create {
-				log.Println(event)
-				// filesystem sometimes sends to create events for
-				// the same file in quick succession.  We use a mutex
-				// to only process a given file once at a time
+			switch event.Op {
+			case fsnotify.Create:
 				mu.Lock()
 				if _, ok := inProgress[event.Name]; !ok {
-					inProgress[event.Name] = true
-					go processFile(event.Name)
+					log.Println(event)
+					inProgress[event.Name] = time.AfterFunc(2*time.Minute, func() {
+						processFile(event.Name)
+					})
 				}
 				mu.Unlock()
-			} else {
-				if event.Op == fsnotify.Remove {
-					log.Println(event)
+			case fsnotify.Write:
+				mu.Lock()
+				if timer, ok := inProgress[event.Name]; ok {
+					timer.Reset(500 * time.Millisecond)
 				}
+				mu.Unlock()
+			case fsnotify.Remove:
+				log.Println(event)
 			}
 		case err := <-watcher.Errors:
 			if err != nil {
